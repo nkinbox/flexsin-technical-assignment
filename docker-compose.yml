@@ -1,0 +1,51 @@
+# Base stack — this file alone is the local development setup.
+#
+#   docker compose up --build      → UI at http://localhost:8501
+#
+# Production adds Caddy and TLS via the overlay:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      GCP_PROJECT: ${GCP_PROJECT:?set GCP_PROJECT in .env}
+      GCP_LOCATION: ${GCP_LOCATION:-us-central1}
+      LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}
+      CHUNK_SIZE: ${CHUNK_SIZE:-1000}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-150}
+      TOP_K: ${TOP_K:-5}
+      RELEVANCE_THRESHOLD: ${RELEVANCE_THRESHOLD:-0.75}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
+      CHROMA_PATH: /data/chroma_db
+      # Application Default Credentials read this path inside the container.
+      GOOGLE_APPLICATION_CREDENTIALS: /gcloud/application_default_credentials.json
+    volumes:
+      # The vector index. A named volume, so `docker compose down` does not
+      # discard indexed documents.
+      - chroma_data:/data
+      # Local ADC, read-only. On the VM the prod overlay removes this mount --
+      # credentials come from the attached service account instead, so no key
+      # file exists anywhere.
+      - ${GCLOUD_CONFIG_DIR:-~/.config/gcloud}:/gcloud:ro
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/ui.Dockerfile
+    environment:
+      API_BASE: http://api:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  chroma_data:

@@ -1,0 +1,60 @@
+# Caddy reverse proxy.
+#
+# SITE_ADDRESS comes from .env and selects the mode:
+#
+#   1. ":80" — plain HTTP, reachable at http://<VM-IP>. No DNS needed.
+#      Traffic is UNENCRYPTED. Fine for a demo with non-sensitive documents;
+#      enable the basic_auth block below so the URL isn't open to anyone.
+#      Let's Encrypt cannot issue certificates for bare IP addresses, so this
+#      is the only no-DNS option that avoids a browser warning page.
+#
+#   2. A hostname — e.g. my-rag-demo.duckdns.org
+#      Caddy obtains a Let's Encrypt certificate automatically and serves
+#      real HTTPS. Requires the hostname to resolve to this VM and port 80
+#      to be reachable. Best option if you can spare two minutes to register
+#      a free subdomain.
+#
+#   3. A hostname with `tls internal` (uncomment below) — self-signed HTTPS.
+#      Encrypted, but browsers show a warning the visitor must click through.
+
+{$SITE_ADDRESS} {
+	# Uncomment for a self-signed certificate instead of Let's Encrypt:
+	# tls internal
+
+	encode gzip
+
+	# The API. Streamlit calls this server-side over the internal network, so
+	# this route exists for direct API access and the /docs page.
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy api:8000
+	}
+
+	# Everything else is the Streamlit UI. Caddy forwards WebSocket upgrades
+	# automatically, which Streamlit requires — no extra configuration needed.
+	handle {
+		reverse_proxy ui:8501
+	}
+
+	# Optional password protection, pulled in from a mounted directory.
+	#
+	# The glob matches zero files when no auth is configured, which Caddy
+	# accepts -- so auth is enabled by CREATING a file and disabled by
+	# DELETING it, with no edit to this Caddyfile and no rebuild.
+	#
+	# To enable (on the server, in the project directory):
+	#   docker run --rm caddy:2-alpine caddy hash-password --plaintext 'pass'
+	#   printf 'basic_auth {\n\treviewer <paste-hash>\n}\n' > caddy-auth/auth.caddy
+	#   docker compose ... restart caddy
+	#
+	# The hash lives in a gitignored file and is read verbatim by Caddy, so
+	# it never enters the repository and needs no '$' escaping -- unlike an
+	# environment variable, whose '$' characters Compose would interpolate
+	# and silently mangle.
+	import /etc/caddy/auth/*.caddy
+
+	log {
+		output stdout
+		format console
+	}
+}

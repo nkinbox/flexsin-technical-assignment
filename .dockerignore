@@ -1,0 +1,20 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.git/
+.gitignore
+
+# Never bake secrets or local state into an image
+.env
+*-key.json
+service-account*.json
+data/
+_probe_db/
+caddy_data/
+caddy_config/
+
+*.md
+!README.md
+tests/

@@ -1,0 +1,54 @@
+# Production overlay — GCP VM deployment.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Differences from the base stack:
+#   * Caddy terminates TLS and is the ONLY service bound to the host
+#   * api and ui publish no ports — they are reachable only inside the network
+#   * No gcloud credential mount: the VM's attached service account supplies
+#     credentials via the metadata server, so no key file exists on the box
+
+services:
+  api:
+    # `!override` rather than a plain list: Compose MERGES volume lists by
+    # default, so without this the base file's ~/.config/gcloud bind mount
+    # would survive into production and the "no key file on the VM" property
+    # would be quietly false.
+    volumes: !override
+      - chroma_data:/data
+    environment:
+      # Unset the base value: with no key file, the SDK falls through to the
+      # metadata server. Leaving it pointing at a non-existent path would make
+      # credential resolution fail rather than fall back.
+      GOOGLE_APPLICATION_CREDENTIALS: ""
+    # Remove the host port binding — reachable only via Caddy.
+    ports: !reset []
+
+  ui:
+    ports: !reset []
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Optional basic-auth snippet. Empty by default; the Caddyfile's glob
+      # import tolerates zero files. Drop an auth.caddy in here to turn
+      # password protection on. Gitignored, so the hash never gets committed.
+      - ./caddy-auth:/etc/caddy/auth:ro
+      - caddy_data:/data      # certificates — persist, or Let's Encrypt is
+      - caddy_config:/config  # re-requested on every restart (rate limits)
+    environment:
+      # ":80" for plain HTTP on an IP, or a hostname for automatic HTTPS.
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS in .env}
+    depends_on:
+      - api
+      - ui
+    restart: unless-stopped
+
+volumes:
+  chroma_data:
+  caddy_data:
+  caddy_config:

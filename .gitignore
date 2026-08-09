@@ -1,0 +1,22 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets — never commit
+.env
+*-key.json
+service-account*.json
+# Basic-auth snippet holds a password hash; the directory's README stays.
+caddy-auth/*.caddy
+
+# Runtime state
+data/
+_probe_db/
+caddy_data/
+caddy_config/
+
+.vscode/
+.idea/
+.DS_Store
