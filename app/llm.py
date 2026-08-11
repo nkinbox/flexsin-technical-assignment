@@ -27,6 +27,7 @@ from app.config import (
     LLM_MAX_OUTPUT_TOKENS,
     LLM_MODEL,
     LLM_TEMPERATURE,
+    VISION_MODEL,
 )
 
 
@@ -126,6 +127,47 @@ class VertexLLM:
             # Should not happen with a schema applied, but a malformed payload
             # must not surface as a raw traceback to the user.
             raise LLMError(f"Model returned malformed JSON: {text[:200]}") from exc
+
+    def extract_from_media(
+        self,
+        data: bytes,
+        mime_type: str,
+        instruction: str,
+        model: str | None = None,
+    ) -> str:
+        """Read text out of an image or PDF using the vision model.
+
+        This is what makes image upload work: rather than bolting on an OCR
+        engine, the file is handed to the multimodal model once at ingest and
+        the transcription it returns flows into the ordinary chunking pipeline.
+        Everything downstream is unchanged -- an image becomes text with page
+        metadata like any other source.
+
+        It also handles scanned PDFs, which have no text layer for pypdf to
+        read and would otherwise index as empty.
+
+        Raises:
+            LLMError: The request failed.
+        """
+        from google.genai import types
+
+        try:
+            response = self._client.models.generate_content(
+                model=model or VISION_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=data, mime_type=mime_type),
+                    instruction,
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0.0,  # transcription, not interpretation
+                    max_output_tokens=8192,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise LLMError(f"Vertex AI media extraction failed: {exc}") from exc
+
+        return (response.text or "").strip()
 
     def generate_text(
         self,

@@ -1,7 +1,7 @@
-"""Stage 5 — Retrieval-Augmented Generation.
+"""Retrieval-Augmented Generation.
 
 The centrepiece. Grounding is enforced in code, not merely requested in the
-prompt. Three layers, strongest first (execution.md §5):
+prompt. Three layers (execution.md §5):
 
   1. RELEVANCE GATE   -- if nothing retrieved is relevant enough, refuse
                          WITHOUT calling the model. A model that is never
@@ -12,6 +12,12 @@ prompt. Three layers, strongest first (execution.md §5):
   3. CITATION VALIDATION -- every citation number is checked against what was
                          actually retrieved; anything invented is dropped and
                          the answer is flagged unverified.
+
+Retrieval itself is hybrid (see app/retrieval.py): dense vectors and BM25 are
+run in parallel and fused, so both paraphrased and verbatim questions find
+their answer. The gate accepts a chunk on either kind of evidence, which makes
+it deliberately permissive -- a question the documents genuinely answer should
+not be refused, and layers 2 and 3 remain in place behind it.
 """
 
 from __future__ import annotations
@@ -20,7 +26,8 @@ from dataclasses import dataclass, field
 
 from app.config import REFUSAL_MESSAGE, RELEVANCE_THRESHOLD, TOP_K
 from app.llm import LLMError, get_llm
-from app.store import Retrieved, get_store
+from app.retrieval import retrieve
+from app.store import Retrieved
 
 SYSTEM_INSTRUCTION = """\
 You answer questions strictly from a set of numbered source passages taken from \
@@ -124,14 +131,14 @@ def answer_question(
     Returns:
         An `Answer`. Refusals are returned, never raised.
     """
-    store = get_store()
-    retrieved = store.query(question, top_k=top_k, doc_ids=doc_ids)
-
-    # ---- Layer 1: the relevance gate ------------------------------------
-    # Discard anything too distant to be about this question. If that leaves
-    # nothing, refuse here -- no model call, no chance to hallucinate, no
-    # tokens spent on a question the documents cannot answer.
-    relevant = [chunk for chunk in retrieved if chunk.distance <= threshold]
+    # ---- Layer 1: hybrid retrieval and the relevance gate ---------------
+    # `retrieve` runs dense and lexical search, fuses the rankings, and drops
+    # anything that cleared neither bar. An empty result means the documents
+    # have nothing to say about this question -- refuse here, with no model
+    # call, no chance to hallucinate, and no tokens spent.
+    relevant = retrieve(
+        query=question, doc_ids=doc_ids, top_k=top_k, threshold=threshold
+    )
 
     if not relevant:
         return Answer(answer=REFUSAL_MESSAGE, found=False, gated=True)

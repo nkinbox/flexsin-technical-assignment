@@ -1,6 +1,7 @@
 """Chunking tests — the strategy is explicitly graded, so it is pinned here."""
 
 from app.chunker import chunk_pages
+from app.config import CHUNK_SIZE
 from app.extract import Page
 
 
@@ -17,13 +18,15 @@ def test_short_page_is_one_chunk():
 
 
 def test_long_text_splits_into_multiple_chunks():
-    text = "\n\n".join(f"Paragraph {i}. " + "word " * 40 for i in range(20))
+    text = "\n\n".join(f"Paragraph {i}. " + "word " * 40 for i in range(60))
     chunks = chunk_pages([_page(text)], doc_id="d1", filename="long.txt")
 
     assert len(chunks) > 1
-    # Chunks may exceed the target slightly when a boundary lands just past it;
-    # a wide bound still catches a runaway splitter.
-    assert all(len(c.text) <= 1600 for c in chunks)
+    # The splitter searches for a boundary within the size budget and never
+    # past it, so no chunk should exceed the configured size. Expressed
+    # against CHUNK_SIZE rather than a literal, so retuning the size does not
+    # silently invalidate the assertion.
+    assert all(len(c.text) <= CHUNK_SIZE for c in chunks)
 
 
 def test_consecutive_chunks_overlap():
@@ -40,8 +43,11 @@ def test_consecutive_chunks_overlap():
 
 def test_splits_prefer_paragraph_boundaries():
     """A paragraph break should be chosen over splitting mid-sentence."""
-    para_a = "Alpha. " * 90       # ~630 chars
-    para_b = "Bravo. " * 90
+    # Each paragraph is sized so the pair exceeds one chunk and the splitter
+    # has to choose a boundary between them.
+    repeats = (CHUNK_SIZE // 7) - 10
+    para_a = "Alpha. " * repeats
+    para_b = "Bravo. " * repeats
     chunks = chunk_pages(
         [_page(f"{para_a.strip()}\n\n{para_b.strip()}")],
         doc_id="d1",
@@ -98,7 +104,7 @@ def test_chunk_index_is_sequential_across_document():
 def test_unbroken_text_still_terminates():
     """Text with no separators must not loop forever or lose content."""
     chunks = chunk_pages(
-        [_page("x" * 5000)], doc_id="d1", filename="blob.txt"
+        [_page("x" * (CHUNK_SIZE * 3))], doc_id="d1", filename="blob.txt"
     )
 
     assert len(chunks) > 1

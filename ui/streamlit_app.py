@@ -74,9 +74,16 @@ with st.sidebar:
 
     uploads = st.file_uploader(
         "Upload documents",
-        type=["pdf", "docx", "txt", "md"],
+        type=[
+            "pdf", "docx", "txt", "md",
+            "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif",
+        ],
         accept_multiple_files=True,
-        help="PDF, DOCX, TXT and MD. Image input is not supported in this build.",
+        help=(
+            "Documents (PDF, DOCX, TXT, MD) and images (PNG, JPG, WEBP, GIF, "
+            "BMP, TIFF). Images and scanned PDFs are read by the vision model "
+            "at upload, so they take a few seconds longer."
+        ),
     )
 
     for upload in uploads or []:

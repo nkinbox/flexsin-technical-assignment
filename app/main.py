@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from app import memory
 from app.chunker import chunk_pages
 from app.config import MAX_UPLOAD_BYTES, MAX_UPLOAD_MB, SUPPORTED_EXTENSIONS
-from app.extract import UnsupportedFileError, extract
+from app.extract import ExtractionError, UnsupportedFileError, extract
 from app.llm import LLMError, get_llm
 from app.rag import answer_question
 from app.store import get_store
@@ -35,9 +35,9 @@ logger = logging.getLogger("rag")
 app = FastAPI(
     title="Document-Aware RAG Chatbot",
     description=(
-        "Answers questions strictly from uploaded documents. "
-        "Grounding is enforced in code: if nothing relevant is retrieved, the "
-        "model is never called."
+        "Answers questions strictly from uploaded documents, using hybrid "
+        "retrieval (dense vectors + BM25). Grounding is enforced in code: if "
+        "nothing relevant is retrieved, the model is never called."
     ),
     version="1.0.0",
 )
@@ -83,6 +83,10 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
         pages = extract(file.filename or "unnamed", data)
     except UnsupportedFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ExtractionError as exc:
+        # A supported file we could not read -- an unreadable image, or a
+        # scanned PDF when the vision model was unreachable.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Extraction failed for %s", file.filename)
         raise HTTPException(
@@ -90,13 +94,12 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
         ) from exc
 
     if not pages:
-        # Most often a scanned/image-only PDF. Say so explicitly rather than
-        # indexing an empty document that then answers nothing.
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail=(
-                "No text could be extracted. If this is a scanned PDF, it has no "
-                "text layer — image and OCR input are not supported in this build."
+                "No text could be extracted from this file. If it is a scanned "
+                "document, check that Vertex AI is reachable — scans are read "
+                "with the vision model."
             ),
         )
 
@@ -109,7 +112,22 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
             detail="The document produced no indexable text.",
         )
 
-    get_store().add_chunks(chunks)
+    try:
+        get_store().add_chunks(chunks)
+    except LLMError as exc:
+        # Indexing embeds every chunk, so a credentials or quota problem
+        # surfaces here. Report it as a dependency failure with the actual
+        # cause rather than as an opaque 500.
+        logger.error("Embedding failed while indexing %s: %s", file.filename, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Could not embed the document: {exc} "
+                "Set EMBEDDING_PROVIDER=local to embed in-process without "
+                "credentials."
+            ),
+        ) from exc
+
     logger.info(
         "Indexed %s: %d pages -> %d chunks", file.filename, len(pages), len(chunks)
     )

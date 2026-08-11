@@ -1,11 +1,12 @@
-"""Stage 4 — Vector store.
+"""Vector store.
 
 Embedded ChromaDB with cosine similarity and on-disk persistence.
 
-Embedded rather than client/server: for a single-node POC it gives real vector
-database semantics (cosine search, metadata filtering) with no extra container
-and no server to operate. `CHROMA_PATH` points at a mounted volume so the index
-survives container restarts.
+Embeddings are computed by `app.embedder` and passed to Chroma explicitly
+rather than registering a Chroma embedding function. That keeps one code path
+for both providers, keeps the asymmetric document/query task types under our
+control, and avoids coupling the persisted collection to a Chroma-side
+embedding configuration.
 """
 
 from __future__ import annotations
@@ -21,10 +22,10 @@ from app.embedder import get_embedder
 
 @dataclass
 class Retrieved:
-    """A chunk returned by search, with its distance from the query.
+    """A chunk returned by search, with the evidence behind its selection.
 
-    `distance` is cosine distance: lower is more similar. It is carried through
-    rather than discarded because the relevance gate in `rag.py` depends on it.
+    Carries scores from both retrievers so the relevance gate can reason about
+    lexical and semantic evidence separately.
     """
 
     text: str
@@ -32,7 +33,16 @@ class Retrieved:
     filename: str
     page_number: int
     chunk_index: int
-    distance: float
+
+    # Cosine distance; lower is nearer. None when the chunk was found only by
+    # lexical search and never scored by the vector retriever.
+    distance: float | None = None
+
+    # Okapi BM25 score; higher is better. None when found only by vector search.
+    bm25_score: float | None = None
+
+    # Fused rank score, set by hybrid retrieval.
+    fused_score: float = 0.0
 
 
 class VectorStore:
@@ -43,24 +53,33 @@ class VectorStore:
         self._client = chromadb.PersistentClient(path=path)
         self._collection = self._client.get_or_create_collection(
             name=collection,
-            embedding_function=get_embedder().chroma_embedding_function,
             # Cosine is the right metric for normalised sentence embeddings.
-            # Chroma defaults to L2, so this must be set explicitly -- and it is
-            # fixed at creation time, which is why it lives here rather than in
-            # a query parameter.
+            # Chroma defaults to L2 and this is fixed at creation time.
             metadata={"hnsw:space": "cosine"},
         )
+        # Invalidation counter for the BM25 index, which is derived from this
+        # collection and must be rebuilt whenever the corpus changes.
+        self._version = 0
+
+    @property
+    def version(self) -> int:
+        """Increments on every mutation. Used to invalidate derived indexes."""
+        return self._version
 
     def add_chunks(self, chunks: list[Chunk]) -> int:
-        """Index chunks. Embedding is performed by the collection's function."""
+        """Embed and index chunks."""
         if not chunks:
             return 0
+
+        embeddings = get_embedder().embed_documents([c.text for c in chunks])
 
         self._collection.add(
             ids=[c.chunk_id for c in chunks],
             documents=[c.text for c in chunks],
             metadatas=[c.to_metadata() for c in chunks],
+            embeddings=embeddings,
         )
+        self._version += 1
         return len(chunks)
 
     def query(
@@ -69,15 +88,13 @@ class VectorStore:
         top_k: int,
         doc_ids: list[str] | None = None,
     ) -> list[Retrieved]:
-        """Search for the chunks most similar to `text`.
+        """Dense vector search.
 
         Args:
             text: Query string (already condensed, if it was a follow-up).
             top_k: Maximum chunks to return.
-            doc_ids: Optional scope. When given, only these documents are
-                searched -- applied as a store-level filter rather than
-                post-filtering, so top_k still returns top_k results from
-                within the selected scope.
+            doc_ids: Optional scope. Applied as a store-level filter, so top_k
+                still returns top_k results from within the selected subset.
 
         Returns:
             Chunks ordered nearest-first. May be empty.
@@ -85,30 +102,50 @@ class VectorStore:
         if self._collection.count() == 0:
             return []
 
+        query_embedding = get_embedder().embed_query(text)
         where = {"doc_id": {"$in": doc_ids}} if doc_ids else None
 
         result = self._collection.query(
-            query_texts=[text],
-            n_results=top_k,
+            query_embeddings=[query_embedding],
+            n_results=min(top_k, self._collection.count()),
             where=where,
         )
 
         # Chroma nests results one level per query; we always send exactly one.
-        documents = result["documents"][0]
-        metadatas = result["metadatas"][0]
-        distances = result["distances"][0]
+        return [
+            self._to_retrieved(document, metadata, distance=distance)
+            for document, metadata, distance in zip(
+                result["documents"][0], result["metadatas"][0], result["distances"][0]
+            )
+        ]
+
+    def all_chunks(self, doc_ids: list[str] | None = None) -> list[Retrieved]:
+        """Every indexed chunk, for building the lexical index.
+
+        BM25 needs the whole corpus rather than a nearest-neighbour slice. At
+        POC scale holding it in memory is unremarkable; a larger deployment
+        would push lexical search into the datastore instead.
+        """
+        where = {"doc_id": {"$in": doc_ids}} if doc_ids else None
+        records = self._collection.get(where=where, include=["documents", "metadatas"])
 
         return [
-            Retrieved(
-                text=document,
-                doc_id=metadata["doc_id"],
-                filename=metadata["filename"],
-                page_number=int(metadata["page_number"]),
-                chunk_index=int(metadata["chunk_index"]),
-                distance=float(distance),
-            )
-            for document, metadata, distance in zip(documents, metadatas, distances)
+            self._to_retrieved(document, metadata)
+            for document, metadata in zip(records["documents"], records["metadatas"])
         ]
+
+    @staticmethod
+    def _to_retrieved(
+        document: str, metadata: dict, distance: float | None = None
+    ) -> Retrieved:
+        return Retrieved(
+            text=document,
+            doc_id=metadata["doc_id"],
+            filename=metadata["filename"],
+            page_number=int(metadata["page_number"]),
+            chunk_index=int(metadata["chunk_index"]),
+            distance=distance,
+        )
 
     def list_documents(self) -> list[dict]:
         """Summarise indexed documents: one entry per document with its size."""
@@ -130,6 +167,7 @@ class VectorStore:
     def delete_document(self, doc_id: str) -> None:
         """Remove every chunk belonging to a document."""
         self._collection.delete(where={"doc_id": doc_id})
+        self._version += 1
 
     def count(self) -> int:
         """Total indexed chunks across all documents."""

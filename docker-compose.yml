@@ -10,15 +10,16 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+    # Pass the whole .env through rather than enumerating variables here.
+    # Listing them individually means every new setting silently stops working
+    # in Docker until someone remembers to add it in two places -- and the
+    # symptom (a default quietly overriding your .env) is hard to spot.
+    env_file:
+      - path: .env
+        required: false
     environment:
+      # Container-specific values, which take precedence over .env above.
       GCP_PROJECT: ${GCP_PROJECT:?set GCP_PROJECT in .env}
-      GCP_LOCATION: ${GCP_LOCATION:-us-central1}
-      LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}
-      CHUNK_SIZE: ${CHUNK_SIZE:-1000}
-      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-150}
-      TOP_K: ${TOP_K:-5}
-      RELEVANCE_THRESHOLD: ${RELEVANCE_THRESHOLD:-0.75}
-      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
       CHROMA_PATH: /data/chroma_db
       # Application Default Credentials read this path inside the container.
       GOOGLE_APPLICATION_CREDENTIALS: /gcloud/application_default_credentials.json

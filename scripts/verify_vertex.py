@@ -7,10 +7,11 @@ one thing rather than surfacing later as a confusing runtime error.
     python scripts/verify_vertex.py
 
 Checks, in order:
-  1. GCP_PROJECT is configured
-  2. Credentials resolve (ADC locally, metadata server on a VM)
-  3. The configured model exists in the configured region and responds
-  4. Structured JSON output works — the mechanism grounding depends on
+  1. Credentials resolve (ADC locally, metadata server on a VM)
+  2. The configured model exists in the configured region and responds
+  3. Structured JSON output works — the mechanism grounding depends on
+  4. Embeddings work, when Vertex is the configured embedding provider
+  5. Vision works — image and scanned-PDF ingestion depend on it
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ def main() -> int:
         return 1
 
     # 1. Credentials
-    print("\n[1/3] Resolving credentials…")
+    print("\n[1/5] Resolving credentials…")
     try:
         import google.auth
 
@@ -57,7 +58,7 @@ def main() -> int:
         return 1
 
     # 2. Model reachability
-    print(f"\n[2/3] Calling {LLM_MODEL}…")
+    print(f"\n[2/5] Calling {LLM_MODEL}…")
     try:
         from app.llm import VertexLLM
 
@@ -80,7 +81,7 @@ def main() -> int:
         return 1
 
     # 3. Structured output — the mechanism grounding depends on
-    print("\n[3/3] Checking structured JSON output…")
+    print("\n[3/5] Checking structured JSON output…")
     try:
         result = llm.generate_json(
             system_instruction="Answer from the source only.",
@@ -101,6 +102,44 @@ def main() -> int:
         print(f"      FAIL: {exc}")
         print("\n  The model responded but could not produce schema-constrained")
         print("  JSON. Try a different model id in .env.")
+        return 1
+
+    # 4. Embeddings — only when Vertex is the configured provider
+    from app.config import EMBEDDING_PROVIDER, VERTEX_EMBED_MODEL
+
+    if EMBEDDING_PROVIDER == "vertex":
+        print(f"\n[4/5] Embedding with {VERTEX_EMBED_MODEL}…")
+        try:
+            from app.embedder import VertexEmbedder
+
+            embedder = VertexEmbedder()
+            vectors = embedder.embed_documents(["a test passage about revenue"])
+            query = embedder.embed_query("what was revenue?")
+            assert len(vectors[0]) == len(query) == embedder.dimension
+            print(f"      OK — {embedder.dimension}-dimensional vectors")
+        except Exception as exc:  # noqa: BLE001
+            print(f"      FAIL: {exc}")
+            print(f"\n  Check that '{VERTEX_EMBED_MODEL}' is available in your")
+            print("  region, or set EMBEDDING_PROVIDER=local to embed in-process.")
+            return 1
+    else:
+        print(f"\n[4/5] Embeddings: using local provider, nothing to check")
+
+    # 5. Vision — image ingestion depends on it
+    print("\n[5/5] Checking vision (image ingestion)…")
+    try:
+        # A 1x1 PNG is enough to confirm the model accepts image input.
+        import base64
+
+        pixel = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        llm.extract_from_media(pixel, "image/png", "Describe this image briefly.")
+        print("      OK — the model accepts image input")
+    except Exception as exc:  # noqa: BLE001
+        print(f"      FAIL: {exc}")
+        print("\n  Image and scanned-PDF ingestion will not work.")
+        print(f"  Check that VISION_MODEL is multimodal (current: {llm.model}).")
         return 1
 
     print("\n" + "=" * 60)

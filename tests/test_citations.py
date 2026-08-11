@@ -92,11 +92,9 @@ def test_string_digits_are_accepted():
 
 
 @pytest.fixture
-def mock_store():
-    with patch("app.rag.get_store") as get_store:
-        store = MagicMock()
-        get_store.return_value = store
-        yield store
+def mock_retrieve():
+    with patch("app.rag.retrieve") as retrieve:
+        yield retrieve
 
 
 @pytest.fixture
@@ -107,9 +105,9 @@ def mock_llm():
         yield llm
 
 
-def test_fabricated_citation_flags_answer_unverified(mock_store, mock_llm):
+def test_fabricated_citation_flags_answer_unverified(mock_retrieve, mock_llm):
     """The answer is still returned — but marked, not silently trusted."""
-    mock_store.query.return_value = [_chunk("Revenue was $4.2M.", page=7)]
+    mock_retrieve.return_value = [_chunk("Revenue was $4.2M.", page=7)]
     mock_llm.generate_json.return_value = {
         "answer": "Revenue was $4.2M.",
         "citations": [1, 5],  # [5] was never supplied
@@ -124,8 +122,8 @@ def test_fabricated_citation_flags_answer_unverified(mock_store, mock_llm):
     assert result.citations[0].number == 1
 
 
-def test_all_valid_citations_stay_verified(mock_store, mock_llm):
-    mock_store.query.return_value = [_chunk("A.", page=1), _chunk("B.", page=2)]
+def test_all_valid_citations_stay_verified(mock_retrieve, mock_llm):
+    mock_retrieve.return_value = [_chunk("A.", page=1), _chunk("B.", page=2)]
     mock_llm.generate_json.return_value = {
         "answer": "Both sources agree.",
         "citations": [1, 2],
@@ -138,13 +136,13 @@ def test_all_valid_citations_stay_verified(mock_store, mock_llm):
     assert len(result.citations) == 2
 
 
-def test_citation_text_matches_retrieved_chunk(mock_store, mock_llm):
+def test_citation_text_matches_retrieved_chunk(mock_retrieve, mock_llm):
     """Citation text comes from the retrieved chunk, never from the model.
 
     This is what makes a citation verifiable: the quoted source is the passage
     the system actually retrieved, so it cannot be reworded or invented.
     """
-    mock_store.query.return_value = [_chunk("Exact source wording.", page=3)]
+    mock_retrieve.return_value = [_chunk("Exact source wording.", page=3)]
     mock_llm.generate_json.return_value = {
         "answer": "A paraphrase by the model.",
         "citations": [1],
@@ -156,9 +154,9 @@ def test_citation_text_matches_retrieved_chunk(mock_store, mock_llm):
     assert result.citations[0].text == "Exact source wording."
 
 
-def test_response_dict_shape(mock_store, mock_llm):
+def test_response_dict_shape(mock_retrieve, mock_llm):
     """The API contract the UI relies on."""
-    mock_store.query.return_value = [_chunk("Source.", page=1)]
+    mock_retrieve.return_value = [_chunk("Source.", page=1)]
     mock_llm.generate_json.return_value = {
         "answer": "Answer.",
         "citations": [1],
